@@ -1,0 +1,85 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  filelog:
+    include: [ /logs/legacy.log ]
+    start_at: end
+    storage: file_storage
+    poll_interval: 5s
+    operators:
+      - type: regex_parser
+        regex: '^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?P<event_type>[A-Z_]+): (?P<line>Line\d+)(?:, Count=(?P<count>\d+))?(?:, Fault=(?P<fault>\w+))?(?:, OperatorID=(?P<operator_id>\w+))?(?:, Temp=(?P<temp>[\d\.]+))?'
+        timestamp:
+          parse_from: attributes.timestamp
+          layout: '%Y-%m-%d %H:%M:%S'
+
+  sqlserver/sql1:
+    collection_interval: 30s
+    username: sa
+    password: YourStrong!Passw0rd
+    server: sql-server-1
+    port: 1433
+
+  sqlserver/sql2:
+    collection_interval: 30s
+    username: sa
+    password: YourStrong!Passw0rd
+    server: sql-server-2
+    port: 1433
+
+connectors:
+  count:
+    logs:
+      legacy_log_events_total:
+        description: "Counts the number of events from the legacy log file."
+        attributes:
+          - key: event_type
+            default_value: "unknown"
+          - key: line
+            default_value: "unknown"
+          - key: fault
+            default_value: "none"
+          - key: operator_id
+            default_value: "none"
+
+processors:
+  deltatocumulative:
+    max_stale: 5m
+    max_streams: 1000
+
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol
+
+exporters:
+  debug:
+    verbosity: detailed
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    resource_to_telemetry_conversion:
+      enabled: true
+  otlp/jaeger:
+    endpoint: "jaeger:4317"
+    tls:
+      insecure: true
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    logs:
+      receivers: [filelog]
+      exporters: [count, debug]
+    metrics/regular:
+      receivers: [otlp, sqlserver/sql1, sqlserver/sql2]
+      exporters: [prometheus, debug]
+    metrics/count:
+      receivers: [count]
+      processors: [deltatocumulative]
+      exporters: [prometheus, debug]
+    traces:
+      receivers: [otlp]
+      exporters: [debug, otlp/jaeger]

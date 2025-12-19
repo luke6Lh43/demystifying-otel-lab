@@ -1,0 +1,175 @@
+volumes:
+  prometheus-data:
+  sql1data:
+  sql2data:
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    ports:
+      - "9090:9090"
+    depends_on:
+      - collector
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+      - "14250:14250"
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+
+  mqtt-broker:
+    image: rabbitmq:3-management
+    ports:
+      - "1883:1883"
+      - "15672:15672"
+    volumes:
+      - ./enabled_plugins:/etc/rabbitmq/enabled_plugins
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running", "-q"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  iot-device-1:
+    build: ./iot_device
+    environment:
+      - DEVICE_ID=sensor-1
+      - MQTT_BROKER=mqtt-broker
+    depends_on:
+      mqtt-broker:
+        condition: service_healthy
+
+  iot-device-2:
+    build: ./iot_device
+    environment:
+      - DEVICE_ID=sensor-2
+      - MQTT_BROKER=mqtt-broker
+    depends_on:
+      mqtt-broker:
+        condition: service_healthy
+
+  iot-device-3:
+    build: ./iot_device
+    environment:
+      - DEVICE_ID=sensor-3
+      - MQTT_BROKER=mqtt-broker
+    depends_on:
+      mqtt-broker:
+        condition: service_healthy
+
+  win-agent-1:
+    build: ./fake_win_host
+    environment:
+      - FAKE_WIN_HOST=WIN-AGENT-01
+      - FAKE_MACHINE_ID=WIN-01-ABC
+      - OTEL_SERVICE_NAME=otelcol-win-agent-1
+    depends_on:
+      - collector
+
+  win-agent-2:
+    build: ./fake_win_host
+    environment:
+      - FAKE_WIN_HOST=WIN-AGENT-02
+      - FAKE_MACHINE_ID=WIN-02-XYZ
+      - OTEL_SERVICE_NAME=otelcol-win-agent-2
+    depends_on:
+      - collector
+
+  win-agent-3:
+    build: ./fake_win_host
+    environment:
+      - FAKE_WIN_HOST=WIN-AGENT-03
+      - FAKE_MACHINE_ID=WIN-03-DEF
+      - OTEL_SERVICE_NAME=otelcol-win-agent-3
+    depends_on:
+      - collector
+
+  legacy-app:
+    build: ./legacy_app
+    volumes:
+      - ./logs:/logs
+
+  mqtt-bridge:
+    build: ./mqtt_bridge
+    environment:
+      - MQTT_BROKER=mqtt-broker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=collector:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      mqtt-broker:
+        condition: service_healthy
+      collector:
+        condition: service_started
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otelcol-config.yaml"]
+    volumes:
+      - ./collector/otel-collector-config.yaml:/etc/otelcol-config.yaml
+      - ./logs:/logs
+      - ./production_logs:/production_logs
+      - ./otelcol_storage:/var/lib/otelcol
+    ports:
+      - "8889:8889"
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - jaeger
+
+  sql-server-1:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=YourStrong!Passw0rd
+    ports:
+      - "14331:1433"
+    healthcheck:
+      test: [ "CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "YourStrong!Passw0rd", "-Q", "SELECT 1", "-C" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - sql1data:/var/opt/mssql
+      - ./sql-init/oteluser-init.sql:/docker-entrypoint-initdb.d/oteluser-init.sql:ro
+
+  sql-server-2:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=YourStrong!Passw0rd
+    ports:
+      - "14332:1433"
+    healthcheck:
+      test: [ "CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "YourStrong!Passw0rd", "-Q", "SELECT 1", "-C" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - sql2data:/var/opt/mssql
+      - ./sql-init/oteluser-init.sql:/docker-entrypoint-initdb.d/oteluser-init.sql:ro
+
+  sql-writer-app:
+    build: ./sql_app
+    environment:
+      - SQL1_HOST=sql-server-1
+      - SQL2_HOST=sql-server-2
+      - SQL_USER=sa
+      - SQL_PASSWORD=YourStrong!Passw0rd
+      - SQL_PORT=1433
+      - DB_NAME=TestDB
+    depends_on:
+      sql-server-1:
+        condition: service_healthy
+      sql-server-2:
+        condition: service_healthy
