@@ -11,11 +11,20 @@ receivers:
     storage: file_storage
     poll_interval: 5s
     operators:
+      # --- STEP 1: Generic Parsing ---
+      # Captures Timestamp, Event, Line, and puts the rest into 'params'
       - type: regex_parser
-        regex: '^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?P<event_type>[A-Z_]+): (?P<line>Line\d+)(?:, Count=(?P<count>\d+))?(?:, Fault=(?P<fault>\w+))?(?:, OperatorID=(?P<operator_id>\w+))?(?:, Temp=(?P<temp>[\d\.]+))?'
+        regex: '^(?P<timestamp>.+?) \| (?P<event_type>[A-Z_]+): (?P<line>Line\d+)(?:, (?P<params>.*))?'
         timestamp:
           parse_from: attributes.timestamp
           layout: '%Y-%m-%d %H:%M:%S'
+
+      # --- STEP 2: Extract Fault Only ---
+      # Look specifically for "Fault=Something" inside the 'params' attribute
+      - type: regex_parser
+        regex: 'Fault=(?P<fault>\w+)'
+        parse_from: attributes.params
+        if: 'attributes.params != nil'
 
   sqlserver/sql1:
     collection_interval: 30s
@@ -34,19 +43,27 @@ receivers:
 connectors:
   count:
     logs:
-      legacy_log_events_total:
-        description: "Counts the number of events from the legacy log file."
+      machine_events_total:
+        description: "Count of manufacturing events by type, line, and fault."
         attributes:
           - key: event_type
             default_value: "unknown"
           - key: line
             default_value: "unknown"
           - key: fault
-            default_value: "none"
-          - key: operator_id
-            default_value: "none"
+            default_value: "none" 
 
 processors:
+  # Clean up attributes before counting
+  transform:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          # If no fault was found (e.g., PRODUCT_COMPLETED), explicitly set it to "none"
+          # This ensures the metric label exists and is consistent.
+          - set(attributes["fault"], "none") where attributes["fault"] == nil
+
   deltatocumulative:
     max_stale: 5m
     max_streams: 1000
@@ -72,13 +89,16 @@ service:
   pipelines:
     logs:
       receivers: [filelog]
+      processors: [transform]
       exporters: [count, debug]
-    metrics/regular:
-      receivers: [otlp, sqlserver/sql1, sqlserver/sql2]
-      exporters: [prometheus, debug]
-    metrics/count:
+    
+    metrics/generated:
       receivers: [count]
       processors: [deltatocumulative]
+      exporters: [prometheus, debug]
+
+    metrics/regular:
+      receivers: [otlp, sqlserver/sql1, sqlserver/sql2]
       exporters: [prometheus, debug]
     traces:
       receivers: [otlp]
